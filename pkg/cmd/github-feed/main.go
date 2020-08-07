@@ -14,12 +14,16 @@ func main() {
 
 	ctx := context.Background()
 
-	feed, events_chan, err := lib.NewEventFeed(ctx)
+	conf := &lib.Config{
+		AuthToken: os.Getenv("GITHUB_AUTH_TOKEN"),
+	}
+
+	feed, events_chan, err := lib.NewEventFeed(ctx, conf)
 	if err != nil {
 		log.Panic(err)
 	}
 
-	go feed.Serve()
+	go func() { log.Panic(feed.Serve()) }()
 
 	for events := range events_chan {
 		for _, ev := range events {

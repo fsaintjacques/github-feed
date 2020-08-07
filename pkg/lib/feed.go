@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/google/go-github/v32/github"
+	"github.com/gregjones/httpcache"
+	"golang.org/x/oauth2"
 )
 
 const (
@@ -28,13 +30,29 @@ type EventFeed struct {
 	events chan<- []*github.Event
 }
 
-func NewEventFeed(ctx context.Context) (*EventFeed, <-chan []*github.Event, error) {
-	var feed *EventFeed = &EventFeed{}
+type Config struct {
+	AuthToken string
+}
+
+func NewEventFeed(ctx context.Context, conf *Config) (*EventFeed, <-chan []*github.Event, error) {
+	var feed *EventFeed = &EventFeed{ctx: ctx}
 
 	events := make(chan []*github.Event, defaultFeedCapacity)
 
-	feed.client = github.NewClient(nil)
-	feed.ctx = ctx
+	ts := oauth2.StaticTokenSource(
+		&oauth2.Token{AccessToken: conf.AuthToken},
+	)
+
+	tc := oauth2.NewClient(ctx, ts)
+	tc.Timeout = 5 * time.Second
+
+	tc.Transport = &httpcache.Transport{
+		Transport:           tc.Transport,
+		Cache:               httpcache.NewMemoryCache(),
+		MarkCachedResponses: true,
+	}
+
+	feed.client = github.NewClient(tc)
 	feed.events = events
 
 	return feed, events, nil
@@ -65,7 +83,8 @@ func (f *EventFeed) Serve() error {
 }
 
 // Extract the poll interval hinted by github's API response. If any failure is
-// encountered, default to a safe interval.
+// encountered, default to a safe interval. github will enforce the poll
+// interval, it is not necessary to be more aggressive.
 func pollIntervalFromResponse(r *http.Response) time.Duration {
 	// Fallback default poll interval, values taken from github's documentation.
 	default_duration := time.Duration(defaultPollSeconds) * time.Second
@@ -89,10 +108,9 @@ func (f *EventFeed) pollIntervalOrPropagateError(r *github.Response, err error) 
 		case *github.RateLimitError:
 			// RateLimiteError aren't treated as a real error. Instead, we respect
 			// the rate limit reset interval for the next poll time.
-			rate := err.(*github.RateLimitError).Rate
-			poll_interval := time.Until(rate.Reset.Time)
-			log.Printf("Rate limit exceeded, resets in %d seconds.", poll_interval/time.Second)
-			return poll_interval, true, nil
+			time_left := time.Until(r.Rate.Reset.Time)
+			log.Printf("Rate limit exceeded, resets in %d seconds.", time_left/time.Second)
+			return time_left, true, nil
 		default:
 			// Otherwise, propagate the error.
 			return time.Duration(-1), false, err
@@ -102,6 +120,11 @@ func (f *EventFeed) pollIntervalOrPropagateError(r *github.Response, err error) 
 	// If no error are encountered, extract the next poll interval from the
 	// response header as per documentation.
 	return pollIntervalFromResponse(r.Response), false, nil
+}
+
+func isCachedResponse(r *http.Response) bool {
+	_, ok := r.Header[httpcache.XFromCache]
+	return ok
 }
 
 func (f *EventFeed) poll() (events []*github.Event, poll_interval time.Duration, err error) {
@@ -122,6 +145,11 @@ func (f *EventFeed) poll() (events []*github.Event, poll_interval time.Duration,
 
 		if err != nil || throttled {
 			// An actual error was encountered or github asked for a throttling.
+			break
+		}
+
+		if isCachedResponse(response.Response) {
+			log.Print("Response is cached")
 			break
 		}
 
