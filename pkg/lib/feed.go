@@ -44,7 +44,7 @@ func NewEventFeed(ctx context.Context, conf *Config) (*EventFeed, <-chan []*gith
 	)
 
 	tc := oauth2.NewClient(ctx, ts)
-	tc.Timeout = 5 * time.Second
+	tc.Timeout = 10 * time.Second
 
 	tc.Transport = &httpcache.Transport{
 		Transport:           tc.Transport,
